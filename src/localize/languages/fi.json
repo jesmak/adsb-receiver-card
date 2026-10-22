@@ -1,0 +1,50 @@
+{
+    "common": {
+        "name": "ADS-B-vastaanotin",
+        "description": "ADS-B-vastaanottimen tila ADS-B Live -integraatiosta",
+        "invalid_configuration": "Virheellinen konfiguraatio. Valitse vastaanotin.",
+        "no_receiver": "Vastaanotinta ei löydy",
+        "no_entity": "Entiteettiä {entity} ei löydy"
+    },
+    "status": {
+        "receiving": "Kuulee",
+        "quiet": "Hiljaista",
+        "unavailable": "Ei saatavilla"
+    },
+    "rates": {
+        "messages": "{value} viestiä/s",
+        "positions": "{value} sijaintia/min",
+        "positions_one": "{value} sijainti/min"
+    },
+    "figures": {
+        "tracked": "seurannassa",
+        "with_position": "sijainnilla",
+        "range": "kantama, {minutes} min"
+    },
+    "curve": {
+        "past": "{hours} h sitten",
+        "now": "nyt",
+        "peak": "huippu {value}"
+    },
+    "meter": {
+        "signal": "Signaali",
+        "noise": "Kohina",
+        "signal_unknown": "Signaali ei tiedossa"
+    },
+    "editor": {
+        "device": "Vastaanotin",
+        "name": "Nimi",
+        "name_helper": "Korvaa vastaanottimen nimen",
+        "layout": "Asettelu",
+        "layout_full": "Täysi",
+        "layout_compact": "Tiivis, yksi rivi",
+        "feeders": "Syötteet",
+        "feeders_helper": "Muiden syöttäjien tila riveinä vastaanottimen alla, esimerkiksi Flightradar24:n. Näkyy täydessä asettelussa.",
+        "feeder_entity": "Tila",
+        "feeder_entity_helper": "Onko syöttäjä toiminnassa",
+        "feeder_name": "Nimi",
+        "feeder_name_helper": "Korvaa entiteetin nimen",
+        "feeder_detail": "Lisätieto",
+        "feeder_detail_helper": "Näytetään tilan perässä, esimerkiksi syöttäjän raportoimat koneet"
+    }
+}

@@ -1,0 +1,6 @@
+{
+    "name": "ADS-B receiver card",
+    "render_readme": true,
+    "filename": "adsb-receiver-card.js",
+    "homeassistant": "2026.9.3"
+}
