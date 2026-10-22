@@ -698,6 +698,8 @@ var en_default = {
     name_type: "Callsign \xB7 type",
     altitude: "Altitude",
     signal: "Signal",
+    located: "Position known",
+    not_located: "No position",
     ground: "on the ground",
     now: "now",
     seconds: "{value} s",
@@ -767,6 +769,8 @@ var fi_default = {
     name_type: "Tunnus \xB7 tyyppi",
     altitude: "Korkeus",
     signal: "Signaali",
+    located: "Sijainti tiedossa",
+    not_located: "Ei sijaintia",
     ground: "maassa",
     now: "nyt",
     seconds: "{value} s",
@@ -1347,6 +1351,7 @@ var AdsbReceiverCard = class extends i4 {
   plane(plane, unit) {
     const format = this.numberFormat();
     const altitude = plane.on_ground ? this.text("list.ground") : plane.altitude === void 0 ? "\u2013" : `${formatNumber(plane.altitude, format, 0)} ${unit}`;
+    const position = this.text(plane.position ? "list.located" : "list.not_located");
     const ago = heardAgo(plane.heard, this.clock);
     const sub = [
       plane.speed_kmh === void 0 ? "" : this.text("list.speed", { value: formatNumber(plane.speed_kmh, format, 0) }),
@@ -1356,8 +1361,14 @@ var AdsbReceiverCard = class extends i4 {
             <div class="plane ${plane.position ? "" : "nopos"}">
                 <span class="id"
                     ><span class="callsign">${plane.name}</span
-                    >${plane.type ? b2` <span class="type">${plane.type}</span>` : A}</span
-                >
+                    >${plane.type ? b2` <span class="type">${plane.type}</span>` : A}<ha-icon
+                        class="position"
+                        icon=${plane.position ? "mdi:crosshairs-gps" : "mdi:crosshairs-question"}
+                        role="img"
+                        aria-label=${position}
+                        title=${position}
+                    ></ha-icon
+                ></span>
                 <span class="sub">${sub.join(" \xB7 ")}</span>
                 <span class="altitude">${altitude}</span>
                 <span class="signal"
@@ -1960,6 +1971,14 @@ var AdsbReceiverCard = class extends i4 {
 
             .plane .callsign {
                 font-weight: 500;
+            }
+
+            /* Whether the aircraft's position is known, after its type, centred on the capitals the callsigns and types are. */
+            .plane .position {
+                --mdc-icon-size: 14px;
+                margin-left: 4px;
+                color: var(--secondary-text-color);
+                vertical-align: 1px;
             }
 
             .plane .type {

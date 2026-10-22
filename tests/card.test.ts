@@ -916,6 +916,12 @@ describe("adsb-receiver-card", () => {
                 const fill = drawn.querySelector<HTMLElement>(".signal i");
                 expect(fill ? fill.style.width : null).toBe(row.signal === undefined ? "83.2%" : row.signal);
                 expect(drawn.classList.contains("nopos")).toBe(row.dimmed ?? false);
+                // After the type, or the name without one, an icon says whether the aircraft's position is known.
+                const located = !(row.dimmed ?? false);
+                const icon = drawn.querySelector(".id .position");
+                expect(icon?.getAttribute("icon")).toBe(located ? "mdi:crosshairs-gps" : "mdi:crosshairs-question");
+                expect(icon?.getAttribute("aria-label")).toBe(located ? "Sijainti tiedossa" : "Ei sijaintia");
+                expect(icon?.getAttribute("title")).toBe(icon?.getAttribute("aria-label"));
             });
         });
 

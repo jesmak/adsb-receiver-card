@@ -36,6 +36,8 @@
         "name_type": "Tunnus · tyyppi",
         "altitude": "Korkeus",
         "signal": "Signaali",
+        "located": "Sijainti tiedossa",
+        "not_located": "Ei sijaintia",
         "ground": "maassa",
         "now": "nyt",
         "seconds": "{value} s",

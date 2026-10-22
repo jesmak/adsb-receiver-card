@@ -353,6 +353,7 @@ export class AdsbReceiverCard extends LitElement {
             : plane.altitude === undefined
               ? "–"
               : `${formatNumber(plane.altitude, format, 0)} ${unit}`;
+        const position = this.text(plane.position ? "list.located" : "list.not_located");
         const ago = heardAgo(plane.heard, this.clock);
         const sub = [
             plane.speed_kmh === undefined ? "" : this.text("list.speed", { value: formatNumber(plane.speed_kmh, format, 0) }),
@@ -362,8 +363,14 @@ export class AdsbReceiverCard extends LitElement {
             <div class="plane ${plane.position ? "" : "nopos"}">
                 <span class="id"
                     ><span class="callsign">${plane.name}</span
-                    >${plane.type ? html` <span class="type">${plane.type}</span>` : nothing}</span
-                >
+                    >${plane.type ? html` <span class="type">${plane.type}</span>` : nothing}<ha-icon
+                        class="position"
+                        icon=${plane.position ? "mdi:crosshairs-gps" : "mdi:crosshairs-question"}
+                        role="img"
+                        aria-label=${position}
+                        title=${position}
+                    ></ha-icon
+                ></span>
                 <span class="sub">${sub.join(" · ")}</span>
                 <span class="altitude">${altitude}</span>
                 <span class="signal"
@@ -1006,6 +1013,14 @@ export class AdsbReceiverCard extends LitElement {
 
             .plane .callsign {
                 font-weight: 500;
+            }
+
+            /* Whether the aircraft's position is known, after its type, centred on the capitals the callsigns and types are. */
+            .plane .position {
+                --mdc-icon-size: 14px;
+                margin-left: 4px;
+                color: var(--secondary-text-color);
+                vertical-align: 1px;
             }
 
             .plane .type {

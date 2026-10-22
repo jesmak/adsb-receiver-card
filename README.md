@@ -87,8 +87,8 @@ Everything can be set in the card's visual editor, where the device picker offer
 - **The aircraft heard**, a list folded under the meter. It holds the aircraft the receiver itself has heard in the last
   minute, never those only adsb.fi adds to a map, heard last first. Each row has the aircraft's callsign, or its
   registration or address, and type, its altitude, its ground speed, how long ago it was heard, and its signal on the
-  meter's scale. One without a position is dimmed. The list is read from ADS-B Live every 10 seconds, and only while it
-  is open.
+  meter's scale. An icon after the type says whether its position is known, and one without a position is dimmed. The
+  list is read from ADS-B Live every 10 seconds, and only while it is open.
 - **The feeders**, a row each.
 
 In the compact layout the row shows the status, the aircraft tracked, those with a position and the messages per

@@ -36,6 +36,8 @@
         "name_type": "Callsign · type",
         "altitude": "Altitude",
         "signal": "Signal",
+        "located": "Position known",
+        "not_located": "No position",
         "ground": "on the ground",
         "now": "now",
         "seconds": "{value} s",
