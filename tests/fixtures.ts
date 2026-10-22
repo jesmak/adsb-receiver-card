@@ -59,6 +59,8 @@ export function hass(values: Partial<Record<keyof typeof SENSOR_IDS, string>> = 
     }
     return {
         locale: { language: "fi" },
+        // ADS-B Live's actions, as Home Assistant lists them. The aircraft list needs get_receiver_aircraft.
+        services: { adsb_live: { get_aircraft_details: {}, get_receiver_aircraft: {} } },
         states,
         entities,
         devices: {

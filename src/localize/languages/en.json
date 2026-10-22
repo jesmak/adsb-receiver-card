@@ -31,6 +31,19 @@
         "noise": "Noise",
         "signal_unknown": "Signal unknown"
     },
+    "list": {
+        "title": "Aircraft heard",
+        "name_type": "Callsign · type",
+        "altitude": "Altitude",
+        "signal": "Signal",
+        "ground": "on the ground",
+        "now": "now",
+        "seconds": "{value} s",
+        "minutes": "{value} min",
+        "speed": "{value} km/h",
+        "empty": "No aircraft heard in the last minute",
+        "failed": "The aircraft couldn't be read"
+    },
     "editor": {
         "device": "Receiver",
         "name": "Name",
@@ -38,6 +51,10 @@
         "layout": "Layout",
         "layout_full": "Full",
         "layout_compact": "Compact, one row",
+        "list_open": "Aircraft list open at first",
+        "list_open_helper": "Otherwise the list opens from its heading",
+        "max_height": "Maximum height",
+        "max_height_helper": "In pixels. Only the aircraft list scrolls inside it. In a sections view, a set number of rows wins.",
         "feeders": "Feeders",
         "feeders_helper": "Other feeders' status as rows under the receiver, such as Flightradar24's. Shown in the full layout.",
         "feeder_entity": "Status",

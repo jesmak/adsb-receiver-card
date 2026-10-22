@@ -48,13 +48,15 @@ It needs ADS-B Live 1.1.0 or newer, which has the aircraft tracked sensor.
 
 ## Options
 
-| Name      | Type   | Default  | Description                                                      |
-| --------- | ------ | -------- | ---------------------------------------------------------------- |
-| `type`    | string | required | `custom:adsb-receiver-card`                                      |
-| `device`  | string | required | The receiver's device in ADS-B Live                              |
-| `name`    | string |          | Replaces the receiver's name                                     |
-| `layout`  | string | `full`   | `full`, or `compact` for one row                                 |
-| `feeders` | list   |          | Other feeders' status as rows under the receiver, in `full` only |
+| Name         | Type    | Default  | Description                                                                                           |
+| ------------ | ------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `type`       | string  | required | `custom:adsb-receiver-card`                                                                           |
+| `device`     | string  | required | The receiver's device in ADS-B Live                                                                   |
+| `name`       | string  |          | Replaces the receiver's name                                                                          |
+| `layout`     | string  | `full`   | `full`, or `compact` for one row                                                                      |
+| `feeders`    | list    |          | Other feeders' status as rows under the receiver, in `full` only                                      |
+| `list_open`  | boolean | `false`  | Whether the list of aircraft heard is open when the card is shown                                     |
+| `max_height` | number  |          | The most the card grows to, in pixels, with only the list of aircraft scrolling (see [Sizes](#sizes)) |
 
 Each item of `feeders` has these keys:
 
@@ -71,7 +73,7 @@ Everything can be set in the card's visual editor, where the device picker offer
 - **The status.** Receiving, in green, while positions come in. Quiet, in grey, when none do. That is usually an empty
   sky, and an aircraft heard without a position counts as quiet too, as it may simply not send one. Unavailable, in
   red, when the positions sensor is unavailable or disabled, as it is when ADS-B Live can't reach readsb. The numbers,
-  the curve and the meter are then left out.
+  the curve, the meter and the list of aircraft are then left out.
 - **Messages per second and positions per minute** under the status, and the receiver's readsb version.
 - **The aircraft tracked**, with a position or without, how many of them have a position, and the longest range in the
   last 15 minutes. Clicking a number opens its sensor.
@@ -82,16 +84,25 @@ Everything can be set in the card's visual editor, where the device picker offer
 - **Signal and noise** on a meter from −50 to 0 dBFS, the gap between them shaded. A signal close to the noise means
   the antenna hears little. After a minute without messages the signal is unknown and only the noise is shown. A
   receiver that gets its messages over the network rather than from a radio of its own has neither, and no meter.
+- **The aircraft heard**, a list folded under the meter. It holds the aircraft the receiver itself has heard in the last
+  minute, never those only adsb.fi adds to a map, heard last first. Each row has the aircraft's callsign, or its
+  registration or address, and type, its altitude, its ground speed, how long ago it was heard, and its signal on the
+  meter's scale. One without a position is dimmed. The list is read from ADS-B Live every 10 seconds, and only while it
+  is open.
 - **The feeders**, a row each.
 
 In the compact layout the row shows the status, the aircraft tracked, those with a position and the messages per
-second, with the curve on the right. Clicking it opens the aircraft tracked sensor.
+second, with the curve on the right. Clicking it opens the aircraft tracked sensor. It has no list of aircraft.
 
 ## Sizes
 
 In a sections view the card takes a whole section by default and can be made as narrow as half of one. On a narrow
 card the readsb version goes under the rates, and a label too long for its column wraps. In the compact layout the
 curve is left out below 280 px, so the texts keep their room.
+
+An open list of aircraft makes the card as tall as the list. With `max_height` the card grows to that many pixels at
+most and only the list scrolls inside it. In a sections view, rows set to a number give the card its height instead,
+and the list scrolls inside that.
 
 <img src="https://raw.githubusercontent.com/jesmak/adsb-receiver-card/main/docs/images/quiet-narrow-light.png#gh-light-mode-only" width="260" alt="A quiet receiver on a card half a section wide, tracking one aircraft without a position after one 143 km away, its version under the rates and its range label on two lines">
 <img src="https://raw.githubusercontent.com/jesmak/adsb-receiver-card/main/docs/images/quiet-narrow-dark.png#gh-dark-mode-only" width="260" alt="A quiet receiver on a card half a section wide, tracking one aircraft without a position after one 143 km away, its version under the rates and its range label on two lines">

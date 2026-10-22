@@ -1,13 +1,15 @@
 /**
  * A dashboard card for the state of an ADS-B receiver from the ADS-B Live integration: whether it hears anything, the
- * aircraft it tracks and their curve over the last day, its range, its signal against the noise, and other feeders'
- * status. The compact layout puts the same on one row.
+ * aircraft it tracks and their curve over the last day, its range, its signal against the noise, a list of the aircraft
+ * it hears, and other feeders' status. The compact layout puts the same on one row, without the list.
  */
 import { LitElement, css, html, nothing } from "lit";
 import type { CSSResultGroup, PropertyValues, TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
-import { CARD_VERSION, HISTORY_HOURS, HISTORY_REFRESH_MS, RANGE_MINUTES } from "./const";
+import { byHeard, fetchReceiverAircraft, hasReceiverAircraft, heardAgo } from "./aircraft";
+import type { HeardAircraft, ReceiverAircraft } from "./aircraft";
+import { AIRCRAFT_REFRESH_MS, CARD_VERSION, HISTORY_HOURS, HISTORY_REFRESH_MS, RANGE_MINUTES } from "./const";
 import type { SensorKey } from "./const";
 import "./editor";
 import type { HomeAssistant } from "./hass";
@@ -19,6 +21,7 @@ import {
     feederState,
     formatNumber,
     meter,
+    meterPlace,
     receiverDevices,
     receiverName,
     receiverSensors,
@@ -62,12 +65,28 @@ const SMALL_CURVE = { width: 90, height: 32 };
 @customElement("adsb-receiver-card")
 export class AdsbReceiverCard extends LitElement {
     @property({ attribute: false }) public hass?: HomeAssistant;
+    /** "grid" in a sections view, as Home Assistant sets it. */
+    @property({ attribute: false }) public layout?: string;
     @state() private config?: AdsbReceiverCardConfig;
     @state() private history: StatisticRow[] = [];
     /** Whether the recorder has answered for the curve's sensor, so a lone present value means it has no hour yet. */
     @state() private historyLoaded = false;
     private historyOf?: string;
     private timer?: ReturnType<typeof setInterval>;
+    @state() private listOpen = false;
+    /** The receiver's aircraft from the last answer for `aircraftOf`, kept when a later reading fails. */
+    @state() private aircraft?: ReceiverAircraft;
+    /** Whether reading failed before any answer came. */
+    @state() private aircraftFailed = false;
+    /** The time the rows' ages count from, moved on every second while the list is open on the card. */
+    @state() private clock = Date.now();
+    private aircraftOf?: string;
+    private aircraftReadAt = 0;
+    private aircraftReading = false;
+    private listTimer?: ReturnType<typeof setInterval>;
+    /** While the list slides open or shut, it doesn't scroll, so a held card shows no scrollbar as the list grows. */
+    @state() private sliding = false;
+    private slideTimer?: ReturnType<typeof setTimeout>;
 
     public static getConfigElement(): HTMLElement {
         return document.createElement("adsb-receiver-card-editor");
@@ -82,11 +101,39 @@ export class AdsbReceiverCard extends LitElement {
         if (!config || typeof config.device !== "string" || !config.device) {
             throw new Error(translate(browserLanguage(), "common.invalid_configuration"));
         }
+        const maxHeight = config.max_height as unknown;
+        if (maxHeight !== undefined && !(typeof maxHeight === "number" && Number.isFinite(maxHeight) && maxHeight > 0)) {
+            throw new Error(translate(browserLanguage(), "common.invalid_configuration"));
+        }
+        const previous = this.config;
+        // A list opened or shut by hand stays so, unless the configuration's own list_open changed. Only true opens it, so
+        // list_open: false is the same as none.
+        if (!previous || (previous.list_open === true) !== (config.list_open === true)) {
+            if (previous && this.listOpen !== (config.list_open === true)) {
+                this.slide();
+            }
+            this.listOpen = config.list_open === true;
+        }
+        if (previous && previous.device !== config.device) {
+            // Another receiver's aircraft are none of this one's, even while its own are on the way.
+            this.aircraft = undefined;
+            this.aircraftFailed = false;
+            this.aircraftOf = config.device;
+            this.aircraftReadAt = 0;
+        }
         this.config = { ...config, feeders: Array.isArray(config.feeders) ? config.feeders.filter((feeder) => !!feeder?.entity) : [] };
+        if (this.isConnected) {
+            if (this.listOpen) {
+                this.startList();
+            } else {
+                this.stopList();
+            }
+        }
     }
 
     public getCardSize(): number {
-        return this.compact() ? 1 : 5 + (this.config?.feeders?.length ?? 0);
+        // One for the list's heading.
+        return this.compact() ? 1 : 6 + (this.config?.feeders?.length ?? 0);
     }
 
     /** In a sections view the card takes a whole section by default and is never narrower than half of one. */
@@ -99,11 +146,17 @@ export class AdsbReceiverCard extends LitElement {
         super.connectedCallback();
         this.timer = setInterval(() => void this.loadHistory(true), HISTORY_REFRESH_MS);
         void this.loadHistory(true);
+        if (this.listOpen) {
+            this.startList();
+        }
     }
 
     public disconnectedCallback(): void {
         super.disconnectedCallback();
         clearInterval(this.timer);
+        clearTimeout(this.slideTimer);
+        this.sliding = false;
+        this.stopList();
     }
 
     protected shouldUpdate(changed: PropertyValues): boolean {
@@ -116,12 +169,20 @@ export class AdsbReceiverCard extends LitElement {
             previous.devices !== this.hass.devices ||
             previous.locale !== this.hass.locale ||
             previous.language !== this.hass.language ||
+            previous.services !== this.hass.services ||
             previous.formatEntityState !== this.hass.formatEntityState
         ) {
             return true;
         }
         // Home Assistant hands the card every state change in the house; only the receiver's sensors and the feeders matter.
         return this.watched().some((id) => previous.states[id] !== this.hass?.states[id]);
+    }
+
+    /** A redraw while the list is on the card shows its ages as they are now, also the first one after it comes back. */
+    protected willUpdate(): void {
+        if (this.listOpen && this.listShown()) {
+            this.clock = Date.now();
+        }
     }
 
     protected updated(): void {
@@ -179,8 +240,9 @@ export class AdsbReceiverCard extends LitElement {
         const device = this.hass?.devices?.[this.config?.device ?? ""];
         const version = device?.sw_version ? [device.manufacturer, device.sw_version].filter(Boolean).join(" ") : "";
         const available = status !== "unavailable";
+        const height = this.heightStyle();
         return html`
-            <ha-card class="full ${status}">
+            <ha-card class="full ${status} ${height ? "held" : ""}" style=${height}>
                 <div class="top">
                     ${this.icon()}
                     <div class="who">
@@ -198,7 +260,7 @@ export class AdsbReceiverCard extends LitElement {
                                   ${this.figure(sensors.aircraft_with_position, "figures.with_position")}
                                   ${this.figure(sensors.max_range, "figures.range", true, { minutes: formatNumber(RANGE_MINUTES, this.numberFormat(), 0) })}
                               </div>
-                              ${this.curve(sensors)} ${this.meter(sensors)}
+                              ${this.curve(sensors)} ${this.meter(sensors)} ${this.aircraftList()}
                           `
                         : nothing
                 }
@@ -228,6 +290,173 @@ export class AdsbReceiverCard extends LitElement {
                 </button>
             </ha-card>
         `;
+    }
+
+    /** The aircraft the receiver hears, folded under its heading. It is read only while it is open. */
+    private aircraftList(): TemplateResult | typeof nothing {
+        if (!this.listShown()) {
+            return nothing;
+        }
+        const count = this.listOpen && this.aircraft ? this.aircraft.aircraft.length : undefined;
+        return html`
+            <div class="aircraft ${this.sliding ? "sliding" : ""}">
+                <button
+                    class="list-heading ${this.listOpen ? "open" : ""}"
+                    aria-expanded=${this.listOpen ? "true" : "false"}
+                    @click=${this.toggleList}
+                >
+                    <span class="list-title">${this.text("list.title")}</span>
+                    ${count === undefined ? nothing : html`<span class="count">${formatNumber(count, this.numberFormat(), 0)}</span>`}
+                    <ha-icon icon="mdi:chevron-down"></ha-icon>
+                </button>
+                <div class="fold ${this.listOpen ? "open" : ""}" ?inert=${!this.listOpen} @transitionend=${this.slid}>
+                    <div class="fold-in">${this.planes()}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    /** Whether the list is on the card: the full layout of a receiver that isn't unavailable, with ADS-B Live's action. */
+    private listShown(): boolean {
+        const hass = this.hass;
+        if (!hass || !this.config || this.compact() || !hasReceiverAircraft(hass) || !hass.devices?.[this.config.device]) {
+            return false;
+        }
+        const sensors = receiverSensors(hass, this.config.device);
+        return Object.keys(sensors).length > 0 && receiverStatus(hass, sensors) !== "unavailable";
+    }
+
+    private planes(): TemplateResult | typeof nothing {
+        if (!this.aircraft) {
+            return this.aircraftFailed ? html`<div class="message">${this.text("list.failed")}</div>` : nothing;
+        }
+        if (!this.aircraft.aircraft.length) {
+            return html`<div class="message">${this.text("list.empty")}</div>`;
+        }
+        const unit = this.aircraft.altitude_unit;
+        return html`
+            <div class="planes">
+                <div class="plane-head">
+                    <span>${this.text("list.name_type")}</span>
+                    <span>${this.text("list.altitude")}</span>
+                    <span>${this.text("list.signal")}</span>
+                </div>
+                ${byHeard(this.aircraft.aircraft).map((plane) => this.plane(plane, unit))}
+            </div>
+        `;
+    }
+
+    private plane(plane: HeardAircraft, unit: string): TemplateResult {
+        const format = this.numberFormat();
+        const altitude = plane.on_ground
+            ? this.text("list.ground")
+            : plane.altitude === undefined
+              ? "–"
+              : `${formatNumber(plane.altitude, format, 0)} ${unit}`;
+        const ago = heardAgo(plane.heard, this.clock);
+        const sub = [
+            plane.speed_kmh === undefined ? "" : this.text("list.speed", { value: formatNumber(plane.speed_kmh, format, 0) }),
+            ago ? this.text(`list.${ago.unit}`, { value: formatNumber(ago.value, format, 0) }) : "",
+        ].filter(Boolean);
+        return html`
+            <div class="plane ${plane.position ? "" : "nopos"}">
+                <span class="id"
+                    ><span class="callsign">${plane.name}</span
+                    >${plane.type ? html` <span class="type">${plane.type}</span>` : nothing}</span
+                >
+                <span class="sub">${sub.join(" · ")}</span>
+                <span class="altitude">${altitude}</span>
+                <span class="signal"
+                    >${plane.rssi === undefined ? nothing : html`<i style="width: ${Number(meterPlace(plane.rssi).toFixed(1))}%"></i>`}</span
+                >
+            </div>
+        `;
+    }
+
+    private toggleList(): void {
+        this.slide();
+        this.listOpen = !this.listOpen;
+        if (this.listOpen && this.isConnected) {
+            this.startList();
+        } else {
+            this.stopList();
+        }
+    }
+
+    private slide(): void {
+        this.sliding = true;
+        clearTimeout(this.slideTimer);
+        // The slide's end lifts it. Without a slide, as with reduced motion, there is no end to wait for.
+        this.slideTimer = setTimeout(() => (this.sliding = false), 1000);
+    }
+
+    private readonly slid = (event: TransitionEvent): void => {
+        if (event.propertyName === "grid-template-rows" && event.target === event.currentTarget) {
+            clearTimeout(this.slideTimer);
+            this.sliding = false;
+        }
+    };
+
+    /** Reads the list now and every AIRCRAFT_REFRESH_MS, and moves its ages on every second. */
+    private startList(): void {
+        this.stopList();
+        this.clock = Date.now();
+        void this.loadAircraft();
+        this.listTimer = setInterval(() => {
+            // Open but not on the card, as for an unavailable receiver, nothing is read or drawn until it comes back.
+            if (!this.listShown()) {
+                return;
+            }
+            this.clock = Date.now();
+            if (this.clock - this.aircraftReadAt >= AIRCRAFT_REFRESH_MS) {
+                void this.loadAircraft();
+            }
+        }, 1000);
+    }
+
+    private stopList(): void {
+        clearInterval(this.listTimer);
+        this.listTimer = undefined;
+    }
+
+    private async loadAircraft(): Promise<void> {
+        const hass = this.hass;
+        const device = this.config?.device;
+        if (!hass || !device || this.aircraftReading || !this.listShown()) {
+            return;
+        }
+        if (this.aircraftOf !== device) {
+            // Another receiver's aircraft are none of this one's.
+            this.aircraft = undefined;
+            this.aircraftFailed = false;
+            this.aircraftOf = device;
+        }
+        this.aircraftReading = true;
+        this.aircraftReadAt = Date.now();
+        try {
+            const answer = await fetchReceiverAircraft(hass, device);
+            if (this.aircraftOf === device) {
+                this.aircraft = answer;
+                this.aircraftFailed = false;
+            }
+        } catch (error) {
+            // A reading that fails after an answer keeps that answer, whose ages go on counting up.
+            console.warn("adsb-receiver-card: could not read the aircraft of", device, error);
+            if (this.aircraftOf === device && !this.aircraft) {
+                this.aircraftFailed = true;
+            }
+        } finally {
+            this.aircraftReading = false;
+        }
+    }
+
+    /** The card's height: the rows of a sections view when they are a number, otherwise up to `max_height`. */
+    private heightStyle(): string {
+        const rows = (this.config?.grid_options as { rows?: unknown } | undefined)?.rows;
+        if (this.layout === "grid" && typeof rows === "number") {
+            return "height: 100%;";
+        }
+        return this.config?.max_height ? `max-height: ${this.config.max_height}px;` : "";
     }
 
     /** Parts of a sentence, each kept whole, so a number never wraps away from its unit. */
@@ -635,6 +864,190 @@ export class AdsbReceiverCard extends LitElement {
 
             .mark.signal {
                 background: var(--primary-color);
+            }
+
+            /* Held to a height, by max_height or a sections view's rows, the card is a column in which only the list scrolls. */
+            ha-card.held {
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            ha-card.held > * {
+                flex: none;
+            }
+
+            ha-card.held > .aircraft {
+                display: flex;
+                flex: 0 1 auto;
+                flex-direction: column;
+                min-height: 0;
+            }
+
+            ha-card.held .fold {
+                flex: 0 1 auto;
+            }
+
+            ha-card.held .fold-in {
+                display: flex;
+                flex-direction: column;
+            }
+
+            ha-card.held .planes {
+                min-height: 0;
+                overflow-y: auto;
+            }
+
+            ha-card.held .aircraft.sliding .planes {
+                overflow-y: hidden;
+            }
+
+            .aircraft {
+                margin-top: 12px;
+                border-top: 1px solid var(--divider-color);
+            }
+
+            .list-heading {
+                display: flex;
+                flex: none;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+                padding: 10px 0 8px;
+                font-size: 14px;
+            }
+
+            .list-heading .count {
+                color: var(--secondary-text-color);
+            }
+
+            .list-heading ha-icon {
+                --mdc-icon-size: 20px;
+                margin-left: auto;
+                color: var(--secondary-text-color);
+                transition: transform var(--ha-animation-duration-fast, 150ms);
+            }
+
+            .list-heading.open ha-icon {
+                transform: rotate(180deg);
+            }
+
+            /* The list slides open and shut, on Home Assistant's timing, which is near none under the system's reduced motion. */
+            .fold {
+                display: grid;
+                grid-template-rows: 0fr;
+                min-height: 0;
+                transition: grid-template-rows var(--ha-animation-duration-normal, 250ms) ease;
+            }
+
+            .fold.open {
+                grid-template-rows: 1fr;
+            }
+
+            .fold-in {
+                min-height: 0;
+                overflow: hidden;
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                .fold,
+                .list-heading ha-icon {
+                    transition: none;
+                }
+            }
+
+            /* The list's last row has its own line under it, the feeders'. */
+            .aircraft + .feeders {
+                margin-top: 0;
+            }
+
+            .aircraft .message {
+                padding: 4px 0 8px;
+                font-size: 13px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane-head,
+            .plane {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto 56px;
+                align-items: center;
+                gap: 0 8px;
+            }
+
+            /* Kept at the top of a list that scrolls. */
+            .plane-head {
+                position: sticky;
+                top: 0;
+                z-index: 1;
+                background: var(--ha-card-background, var(--card-background-color, #fff));
+                padding: 2px 0 4px;
+                font-size: 11px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane-head span:nth-child(2) {
+                text-align: right;
+            }
+
+            .plane {
+                grid-template-areas: "id altitude signal" "sub altitude signal";
+                padding: 5px 0;
+                border-top: 1px solid var(--divider-color);
+                font-size: 13px;
+            }
+
+            .plane .id {
+                grid-area: id;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .plane .callsign {
+                font-weight: 500;
+            }
+
+            .plane .type {
+                margin-left: 2px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane .sub {
+                grid-area: sub;
+                font-size: 11px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane .altitude {
+                grid-area: altitude;
+                text-align: right;
+                white-space: nowrap;
+            }
+
+            .plane .signal {
+                grid-area: signal;
+                position: relative;
+                height: 6px;
+                border-radius: 3px;
+                background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.08);
+            }
+
+            .plane .signal i {
+                position: absolute;
+                inset: 0 auto 0 0;
+                border-radius: 3px;
+                background: var(--primary-color);
+            }
+
+            /* Heard without a position, as the card's figures count it apart. */
+            .plane.nopos .callsign {
+                font-weight: 400;
+            }
+
+            .plane.nopos .id,
+            .plane.nopos .altitude {
+                color: var(--secondary-text-color);
             }
 
             .feeders {

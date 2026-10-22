@@ -69,9 +69,9 @@ describe("adsb-receiver-card", () => {
 
     // What each layout shows in each status. An unavailable receiver keeps only what doesn't come from its sensors: its name
     // and status, and in the full layout its version and feeders.
-    const PARTS = [".rates", ".version", ".figures", ".curve", ".meter", ".feeder", ".line", ".small-curve"];
+    const PARTS = [".rates", ".version", ".figures", ".curve", ".meter", ".aircraft", ".feeder", ".line", ".small-curve"];
     describe("each layout in each status", () => {
-        const FULL = [".rates", ".version", ".figures", ".curve", ".meter", ".feeder"];
+        const FULL = [".rates", ".version", ".figures", ".curve", ".meter", ".aircraft", ".feeder"];
         const COMPACT = [".line", ".small-curve"];
         // Unavailable means the positions sensor is unavailable or isn't there, whatever the other sensors say.
         const everything = Object.fromEntries(Object.keys(SENSOR_IDS).map((key) => [key, "unavailable"]));
@@ -96,7 +96,7 @@ describe("adsb-receiver-card", () => {
                 layout: "full",
                 positions: "only it receiving",
                 status: "Kuulee",
-                shown: [".rates", ".version", ".figures", ".curve", ".feeder"],
+                shown: [".rates", ".version", ".figures", ".curve", ".aircraft", ".feeder"],
             },
             { layout: "compact", positions: "receiving", status: "Kuulee", shown: COMPACT },
             { layout: "compact", positions: "quiet", status: "Hiljaista", shown: COMPACT },
@@ -291,6 +291,11 @@ describe("adsb-receiver-card", () => {
             { change: "a receiver's sensor", next: (state: HomeAssistant) => withState(state, SENSOR_IDS.signal, "-20.0"), redraw: true },
             { change: "a feeder", next: (state: HomeAssistant) => withState(state, "binary_sensor.fr24_link", "off"), redraw: true },
             { change: "a feeder's detail", next: (state: HomeAssistant) => withState(state, "sensor.fr24_reported", "6"), redraw: true },
+            {
+                change: "Home Assistant's actions",
+                next: (state: HomeAssistant) => ({ ...state, services: { ...state.services } }),
+                redraw: true,
+            },
             { change: "another entity", next: (state: HomeAssistant) => withState(state, "light.kitchen", "on"), redraw: false },
         ])("draws itself again when $change changes: $redraw", async ({ next, redraw }) => {
             const state = hass({}, FEEDERS);
@@ -377,6 +382,629 @@ describe("adsb-receiver-card", () => {
         expect(element.shadowRoot!.querySelector(".curve path")?.classList.contains("lone")).toBe(false);
     });
 
+    describe("the aircraft list", () => {
+        const PLANE = {
+            hex: "46a1b2",
+            name: "EXA123",
+            registration: "OH-ZZA",
+            type: "A320",
+            altitude: 3658,
+            speed_kmh: 556,
+            rssi: -8.4,
+            position: true,
+        };
+        const heard = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
+        /** An answer, a failure, one that never comes, or one that comes when the test resolves it. */
+        type Answer = Record<string, unknown> | "failed" | "pending" | Promise<Record<string, unknown>>;
+
+        /** A card whose action answers in turn, the last answer again after the others, and every call it got. */
+        async function withList(
+            answers: Answer[],
+            config: Partial<AdsbReceiverCardConfig> = { list_open: true },
+            change: (state: HomeAssistant) => void = () => undefined,
+        ) {
+            vi.useRealTimers();
+            vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval"] });
+            const state = hass();
+            change(state);
+            const calls: Array<Record<string, unknown>> = [];
+            state.callWS = (async (message: Record<string, unknown>) => {
+                if (message.type !== "call_service") {
+                    return {};
+                }
+                calls.push(message);
+                const answer = answers[Math.min(calls.length - 1, answers.length - 1)];
+                if (answer instanceof Promise) {
+                    return { response: await answer };
+                }
+                if (answer === "pending") {
+                    return new Promise(() => undefined);
+                }
+                if (answer === "failed") {
+                    throw new Error("Action adsb_live.get_receiver_aircraft failed");
+                }
+                return { response: answer };
+            }) as HomeAssistant["callWS"];
+            const element = await card(state, config);
+            await settle(element);
+            return { element, calls, root: element.shadowRoot!, state };
+        }
+
+        const heading = (root: ShadowRoot) => root.querySelector<HTMLButtonElement>(".aircraft .list-heading");
+        /** Whether the list is open: its fold slides open, and a shut one can't be reached. */
+        const isOpen = (root: ShadowRoot) => {
+            const fold = root.querySelector(".aircraft .fold");
+            return !!fold?.classList.contains("open") && !fold.hasAttribute("inert");
+        };
+
+        async function settle(element: AdsbReceiverCard): Promise<void> {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await element.updateComplete;
+        }
+
+        const rows = (root: ShadowRoot) => [...root.querySelectorAll(".plane")];
+
+        it("stays closed and reads nothing until its heading is tapped, then reads every 10 seconds until it is closed", async () => {
+            const { element, calls, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }], {});
+            expect(text(heading(root))).toBe("Kuultavat koneet");
+            expect(isOpen(root)).toBe(false);
+            expect(rows(root)).toHaveLength(0);
+            expect(calls).toHaveLength(0);
+
+            heading(root)!.click();
+            await settle(element);
+            expect(calls).toEqual([
+                {
+                    type: "call_service",
+                    domain: "adsb_live",
+                    service: "get_receiver_aircraft",
+                    service_data: { device: RECEIVER },
+                    return_response: true,
+                },
+            ]);
+            expect(text(heading(root))).toBe("Kuultavat koneet 1");
+            expect(isOpen(root)).toBe(true);
+            expect(rows(root)).toHaveLength(1);
+
+            await vi.advanceTimersByTimeAsync(9_000);
+            expect(calls).toHaveLength(1);
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(calls).toHaveLength(2);
+
+            heading(root)!.click();
+            await settle(element);
+            // Shut, it keeps its rows to slide shut over, out of reach.
+            expect(isOpen(root)).toBe(false);
+            expect(text(heading(root))).toBe("Kuultavat koneet");
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(calls).toHaveLength(2);
+        });
+
+        // Read only while the list is on screen: open, in the full layout, of a receiver that isn't unavailable, with the
+        // action there. Otherwise nothing is read, however long the list has been open.
+        describe("when the list is read", () => {
+            it.each([
+                { layout: "full", status: "receiving", action: true, calls: 4 },
+                { layout: "full", status: "quiet", action: true, calls: 4 },
+                { layout: "full", status: "unavailable", action: true, calls: 0 },
+                { layout: "full", status: "receiving", action: false, calls: 0 },
+                { layout: "compact", status: "receiving", action: true, calls: 0 },
+            ])(
+                "reads $calls times in 30 s in the $layout layout when $status, with the action $action",
+                async ({ layout, status, action, calls: count }) => {
+                    const positions = { receiving: "142", quiet: "0", unavailable: "unavailable" }[status]!;
+                    const { calls, element } = await withList(
+                        [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }],
+                        { list_open: true, layout: layout as AdsbReceiverCardConfig["layout"] },
+                        (state) => {
+                            state.states[SENSOR_IDS.positions_per_minute] = entity(SENSOR_IDS.positions_per_minute, positions);
+                            if (!action) {
+                                state.services = { adsb_live: { get_aircraft_details: {} } };
+                            }
+                        },
+                    );
+                    const renders = vi.spyOn(element as unknown as { render(): unknown }, "render");
+                    await vi.advanceTimersByTimeAsync(30_000);
+                    expect(calls).toHaveLength(count);
+                    // Off the card, the ages aren't moved on either, so the card isn't drawn again every second.
+                    expect(renders.mock.calls.length > 0).toBe(count > 0);
+                    renders.mockRestore();
+                },
+            );
+        });
+
+        it("shows a kept list's ages as they are the moment the receiver comes back", async () => {
+            const { element, state, root } = await withList(
+                [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }, "pending"],
+                { list_open: true },
+            );
+            const positions = (value: string) => ({
+                ...state,
+                states: { ...state.states, [SENSOR_IDS.positions_per_minute]: entity(SENSOR_IDS.positions_per_minute, value) },
+            });
+            element.hass = positions("unavailable");
+            await vi.advanceTimersByTimeAsync(120_000);
+            // Back, and drawn at once, before the next second's tick: heard 121 s ago.
+            element.hass = positions("142");
+            await element.updateComplete;
+            expect(text(root.querySelector(".plane .sub"))).toBe("556 km/h · 2 min");
+        });
+
+        it("stops reading while the receiver is unavailable, and reads again as soon as it comes back", async () => {
+            const { element, calls, state, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }], {
+                list_open: true,
+            });
+            expect(calls).toHaveLength(1);
+            const positions = (value: string) => ({
+                ...state,
+                states: { ...state.states, [SENSOR_IDS.positions_per_minute]: entity(SENSOR_IDS.positions_per_minute, value) },
+            });
+            element.hass = positions("unavailable");
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(calls).toHaveLength(1);
+            expect(root.querySelector(".aircraft")).toBeNull();
+
+            element.hass = positions("142");
+            await vi.advanceTimersByTimeAsync(1_000);
+            await settle(element);
+            expect(calls).toHaveLength(2);
+            expect(text(heading(root))).toBe("Kuultavat koneet 1");
+            expect(rows(root).map((row) => text(row.querySelector(".callsign")))).toEqual(["EXA123"]);
+        });
+
+        it("drops a receiver's list at once when another is picked, and its late answer with it", async () => {
+            let late: (answer: Record<string, unknown>) => void = () => undefined;
+            const answers: Answer[] = [
+                { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                new Promise((resolve) => (late = resolve)),
+                { aircraft: [{ ...PLANE, name: "BRAVO", heard: heard(1) }], altitude_unit: "m" },
+            ];
+            const { element, calls, root, state } = await withList(answers);
+            await vi.advanceTimersByTimeAsync(10_000);
+            expect(calls).toHaveLength(2);
+
+            state.entities!["sensor.second_positions"] = {
+                entity_id: "sensor.second_positions",
+                device_id: "receiver0002",
+                platform: "adsb_live",
+                translation_key: "positions_per_minute",
+            };
+            state.states["sensor.second_positions"] = entity("sensor.second_positions", "0");
+            state.devices!["receiver0002"] = { id: "receiver0002", name: "Toinen", manufacturer: "readsb" };
+            element.hass = { ...state };
+            element.setConfig({ type: "custom:adsb-receiver-card", device: "receiver0002", list_open: true } as AdsbReceiverCardConfig);
+            await settle(element);
+            // The first receiver's reading is still on the way, and its list is gone already.
+            expect(rows(root)).toHaveLength(0);
+            expect(text(heading(root))).toBe("Kuultavat koneet");
+
+            late({ aircraft: [{ ...PLANE, name: "LATE", heard: heard(1) }], altitude_unit: "m" });
+            await settle(element);
+            expect(rows(root)).toHaveLength(0);
+
+            // With the first receiver's reading done, the second one is read.
+            await vi.advanceTimersByTimeAsync(1_000);
+            await settle(element);
+            expect(calls.at(-1)).toMatchObject({ service_data: { device: "receiver0002" } });
+            expect(rows(root).map((row) => text(row.querySelector(".callsign")))).toEqual(["BRAVO"]);
+        });
+
+        // While the list slides, it doesn't scroll, so a held card shows no scrollbar as it grows. The fold's own slide ends it,
+        // or a second later, as under reduced motion there is no slide to end.
+        it("doesn't scroll while it slides", async () => {
+            const { element, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }], {});
+            const sliding = () => !!root.querySelector(".aircraft.sliding");
+            const fold = () => root.querySelector(".aircraft .fold")!;
+            expect(sliding()).toBe(false);
+            heading(root)!.click();
+            await element.updateComplete;
+            expect(sliding()).toBe(true);
+            fold()
+                .querySelector(".fold-in")!
+                .dispatchEvent(Object.assign(new Event("transitionend", { bubbles: true }), { propertyName: "grid-template-rows" }));
+            fold().dispatchEvent(Object.assign(new Event("transitionend"), { propertyName: "opacity" }));
+            await element.updateComplete;
+            expect(sliding()).toBe(true);
+            fold().dispatchEvent(Object.assign(new Event("transitionend"), { propertyName: "grid-template-rows" }));
+            await element.updateComplete;
+            expect(sliding()).toBe(false);
+
+            vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+            heading(root)!.click();
+            await element.updateComplete;
+            expect(sliding()).toBe(true);
+            // A slide takes a quarter of a second, so the fallback mustn't end it early.
+            await vi.advanceTimersByTimeAsync(999);
+            await element.updateComplete;
+            expect(sliding()).toBe(true);
+            await vi.advanceTimersByTimeAsync(1);
+            await element.updateComplete;
+            expect(sliding()).toBe(false);
+        });
+
+        it("leaves no slide behind when the card leaves the page while its list slides", async () => {
+            const { element, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }], {});
+            heading(root)!.click();
+            await element.updateComplete;
+            expect(root.querySelector(".aircraft.sliding")).not.toBeNull();
+            element.remove();
+            document.body.append(element);
+            await element.updateComplete;
+            expect(root.querySelector(".aircraft.sliding")).toBeNull();
+        });
+
+        it("never reads twice at a time", async () => {
+            const { calls } = await withList(["pending"]);
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(calls).toHaveLength(1);
+        });
+
+        it("shows its ages as they are the moment the card comes back to the page", async () => {
+            const { element, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }, "pending"]);
+            element.remove();
+            await vi.advanceTimersByTimeAsync(300_000);
+            // Back, before any tick and with the next answer still on the way: heard 301 s ago.
+            document.body.append(element);
+            await element.updateComplete;
+            expect(text(root.querySelector(".plane .sub"))).toBe("556 km/h · 5 min");
+        });
+
+        it("stops reading when the card leaves the page, and keeps a list shut by hand shut when it comes back", async () => {
+            const { element, calls, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }]);
+            expect(calls).toHaveLength(1);
+            element.remove();
+            await vi.advanceTimersByTimeAsync(30_000);
+            expect(calls).toHaveLength(1);
+
+            // Back on the page, as Home Assistant puts a cached view back, it reads again.
+            document.body.append(element);
+            await settle(element);
+            expect(calls).toHaveLength(2);
+
+            heading(root)!.click();
+            await settle(element);
+            element.remove();
+            document.body.append(element);
+            await settle(element);
+            await vi.advanceTimersByTimeAsync(20_000);
+            expect(isOpen(root)).toBe(false);
+            expect(calls).toHaveLength(2);
+        });
+
+        // A new configuration opens or shuts the list only when its own list_open changed, and another receiver's list is
+        // dropped at once rather than shown under this receiver's name.
+        it("follows a new configuration", async () => {
+            const answers: Answer[] = [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }];
+            const { element, calls, root, state } = await withList(answers, {});
+            heading(root)!.click();
+            await settle(element);
+            expect(calls).toHaveLength(1);
+
+            // The same settings again: the list opened by hand stays open and goes on being read.
+            element.setConfig({ type: "custom:adsb-receiver-card", device: RECEIVER } as AdsbReceiverCardConfig);
+            await settle(element);
+            expect(isOpen(root)).toBe(true);
+
+            // list_open: false is what no list_open meant, so it changes nothing either, and nothing slides.
+            const sliding = () => !!root.querySelector(".aircraft.sliding");
+            root.querySelector(".aircraft .fold")!.dispatchEvent(
+                Object.assign(new Event("transitionend"), { propertyName: "grid-template-rows" }),
+            );
+            element.setConfig({ type: "custom:adsb-receiver-card", device: RECEIVER, list_open: false } as AdsbReceiverCardConfig);
+            await settle(element);
+            expect(isOpen(root)).toBe(true);
+            expect(sliding()).toBe(false);
+
+            // list_open itself changed to false: the list shuts and isn't read any more.
+            element.setConfig({ type: "custom:adsb-receiver-card", device: RECEIVER, list_open: true } as AdsbReceiverCardConfig);
+            element.setConfig({ type: "custom:adsb-receiver-card", device: RECEIVER, list_open: false } as AdsbReceiverCardConfig);
+            await settle(element);
+            expect(isOpen(root)).toBe(false);
+            expect(sliding()).toBe(true);
+            const shut = calls.length;
+            await vi.advanceTimersByTimeAsync(20_000);
+            expect(calls).toHaveLength(shut);
+
+            // list_open changed to true: the list slides open and is read.
+            root.querySelector(".aircraft .fold")!.dispatchEvent(
+                Object.assign(new Event("transitionend"), { propertyName: "grid-template-rows" }),
+            );
+            element.setConfig({ type: "custom:adsb-receiver-card", device: RECEIVER, list_open: true } as AdsbReceiverCardConfig);
+            await settle(element);
+            expect(isOpen(root)).toBe(true);
+            expect(sliding()).toBe(true);
+            expect(calls.length).toBeGreaterThan(shut);
+
+            // Another receiver: the first one's aircraft go at once, while the second's are on the way.
+            state.entities!["sensor.second_positions"] = {
+                entity_id: "sensor.second_positions",
+                device_id: "receiver0002",
+                platform: "adsb_live",
+                translation_key: "positions_per_minute",
+            };
+            state.states["sensor.second_positions"] = entity("sensor.second_positions", "0");
+            state.devices!["receiver0002"] = { id: "receiver0002", name: "Toinen", manufacturer: "readsb" };
+            element.hass = { ...state };
+            answers.push("pending");
+            element.setConfig({ type: "custom:adsb-receiver-card", device: "receiver0002", list_open: true } as AdsbReceiverCardConfig);
+            await settle(element);
+            expect(text(root.querySelector(".top .name"))).toBe("Toinen");
+            expect(rows(root)).toHaveLength(0);
+            expect(text(heading(root))).toBe("Kuultavat koneet");
+        });
+
+        it("isn't there without ADS-B Live's action, as with a version from before it", async () => {
+            const state = hass();
+            state.services = { adsb_live: { get_aircraft_details: {} } };
+            const element = await card(state, { list_open: true });
+            expect(element.shadowRoot!.querySelector(".aircraft")).toBeNull();
+        });
+
+        // What the list says in each answer, and after an answer that fails once the list has been read.
+        describe("the list in each answer", () => {
+            it.each([
+                { answers: ["pending"], heading: "Kuultavat koneet", shown: [], message: "" },
+                { answers: ["failed"], heading: "Kuultavat koneet", shown: [], message: "Koneita ei saatu luettua" },
+                {
+                    answers: [{ aircraft: [], altitude_unit: "m" }],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+                {
+                    answers: [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · nyt",
+                    message: "",
+                },
+                {
+                    answers: ["failed", { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 11 s",
+                    message: "",
+                },
+                {
+                    answers: [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }, "pending"],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 11 s",
+                    message: "",
+                },
+                {
+                    answers: [
+                        { aircraft: [], altitude_unit: "m" },
+                        { aircraft: [], altitude_unit: "m" },
+                    ],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+                {
+                    answers: [
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                    ],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 11 s",
+                    message: "",
+                },
+                {
+                    answers: ["failed", { aircraft: [], altitude_unit: "m" }],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+                { answers: ["failed", "failed"], heading: "Kuultavat koneet", shown: [], message: "Koneita ei saatu luettua" },
+                { answers: ["failed", "pending"], heading: "Kuultavat koneet", shown: [], message: "Koneita ei saatu luettua" },
+                // An empty answer is an answer: a failure after it keeps it.
+                {
+                    answers: [{ aircraft: [], altitude_unit: "m" }, "failed"],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+                {
+                    answers: [{ aircraft: [], altitude_unit: "m" }, "pending"],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+                {
+                    answers: [
+                        { aircraft: [], altitude_unit: "m" },
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                    ],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 11 s",
+                    message: "",
+                },
+                {
+                    answers: [
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                        "failed",
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                    ],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 21 s",
+                    message: "",
+                },
+                // Kept after the failure, its age goes on counting up from the answer: 1 s then, 11 s now.
+                {
+                    answers: [{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }, "failed"],
+                    heading: "Kuultavat koneet 1",
+                    shown: ["EXA123"],
+                    sub: "556 km/h · 11 s",
+                    message: "",
+                },
+                {
+                    answers: [
+                        { aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" },
+                        { aircraft: [], altitude_unit: "m" },
+                    ],
+                    heading: "Kuultavat koneet 0",
+                    shown: [],
+                    message: "Viimeisen minuutin aikana ei ole kuultu koneita",
+                },
+            ] as Array<{ answers: Answer[]; heading: string; shown: string[]; sub?: string; message: string }>)(
+                "shows $shown and says '$message' after the answers $answers",
+                async ({ answers, heading: title, shown, sub, message }) => {
+                    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+                    const { element, root } = await withList(answers);
+                    for (let refresh = 1; refresh < answers.length; refresh++) {
+                        await vi.advanceTimersByTimeAsync(10_000);
+                    }
+                    await settle(element);
+                    expect(text(heading(root))).toBe(title);
+                    expect(rows(root).map((row) => text(row.querySelector(".callsign")))).toEqual(shown);
+                    if (sub) {
+                        expect(text(root.querySelector(".plane .sub"))).toBe(sub);
+                    }
+                    expect(text(root.querySelector(".aircraft .message"))).toBe(message);
+                    warn.mockRestore();
+                },
+            );
+        });
+
+        // Each aircraft's row: its name and type, its altitude in the receiver's unit, its ground speed and when it was last
+        // heard, its signal on the meter's scale, and dimmed without a position.
+        describe("each aircraft's row", () => {
+            it.each([
+                {
+                    case: "everything",
+                    plane: PLANE,
+                    at: 1,
+                    name: "EXA123 A320",
+                    altitude: "3 658 m",
+                    sub: "556 km/h · nyt",
+                    signal: "83.2%",
+                },
+                { case: "feet", plane: { ...PLANE, altitude: 12000 }, unit: "ft", altitude: "12 000 ft" },
+                { case: "on the ground", plane: { ...PLANE, altitude: undefined, on_ground: true }, altitude: "maassa" },
+                { case: "no altitude", plane: { ...PLANE, altitude: undefined }, altitude: "–" },
+                { case: "no type", plane: { ...PLANE, type: undefined }, name: "EXA123" },
+                { case: "no speed", plane: { ...PLANE, speed_kmh: undefined }, sub: "nyt" },
+                { case: "no signal", plane: { ...PLANE, rssi: undefined }, signal: null },
+                { case: "a signal past the meter's end", plane: { ...PLANE, rssi: -61 }, signal: "0%" },
+                { case: "no position", plane: { ...PLANE, position: false }, dimmed: true },
+                { case: "heard just under 2 s ago", at: 1.9, sub: "556 km/h · nyt" },
+                { case: "heard 2 s ago", at: 2, sub: "556 km/h · 2 s" },
+                { case: "heard 59 s ago", at: 59.9, sub: "556 km/h · 59 s" },
+                { case: "heard a minute ago", at: 60, sub: "556 km/h · 1 min" },
+                { case: "heard over 2 minutes ago", at: 125, sub: "556 km/h · 2 min" },
+            ] as Array<{
+                case: string;
+                plane?: Record<string, unknown>;
+                unit?: string;
+                at?: number;
+                name?: string;
+                altitude?: string;
+                sub?: string;
+                signal?: string | null;
+                dimmed?: boolean;
+            }>)("is written so with $case", async (row) => {
+                const plane = { ...(row.plane ?? PLANE), heard: heard(row.at ?? 1) };
+                const { root } = await withList([{ aircraft: [plane], altitude_unit: row.unit ?? "m" }]);
+                const [drawn] = rows(root);
+                expect(text(drawn.querySelector(".id"))).toBe(row.name ?? "EXA123 A320");
+                expect(text(drawn.querySelector(".altitude"))).toBe(row.altitude ?? "3 658 m");
+                expect(text(drawn.querySelector(".sub"))).toBe(row.sub ?? "556 km/h · nyt");
+                const fill = drawn.querySelector<HTMLElement>(".signal i");
+                expect(fill ? fill.style.width : null).toBe(row.signal === undefined ? "83.2%" : row.signal);
+                expect(drawn.classList.contains("nopos")).toBe(row.dimmed ?? false);
+            });
+        });
+
+        // The card's own classes style whatever carries them, as the receiver's name once made each callsign as large as it.
+        it("gives its rows none of the card's own classes", async () => {
+            const { root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }]);
+            expect(rows(root)).toHaveLength(1);
+            expect([...root.querySelectorAll(".name")].map(text)).toEqual(["ADS-B"]);
+            expect(root.querySelector(".plane .status, .plane .value, .plane .label, .plane .figure")).toBeNull();
+        });
+
+        it("counts each row's age up on its own between the readings", async () => {
+            const { element, root } = await withList([{ aircraft: [{ ...PLANE, heard: heard(1) }], altitude_unit: "m" }]);
+            expect(text(root.querySelector(".plane .sub"))).toBe("556 km/h · nyt");
+            await vi.advanceTimersByTimeAsync(3_000);
+            await settle(element);
+            expect(text(root.querySelector(".plane .sub"))).toBe("556 km/h · 4 s");
+        });
+
+        it("puts the aircraft heard last first, and those heard at once by name", async () => {
+            const { root } = await withList([
+                {
+                    aircraft: [
+                        { ...PLANE, hex: "1", name: "OLD", heard: heard(30) },
+                        { ...PLANE, hex: "2", name: "NEW", heard: heard(1) },
+                        { ...PLANE, hex: "3", name: "BETA", heard: heard(10) },
+                        { ...PLANE, hex: "4", name: "ALFA", heard: heard(10) },
+                    ],
+                    altitude_unit: "m",
+                },
+            ]);
+            expect(rows(root).map((row) => text(row.querySelector(".callsign")))).toEqual(["NEW", "ALFA", "BETA", "OLD"]);
+        });
+
+        // A sections view's rows set the height when they are a number. Otherwise max_height is the most the card grows to,
+        // and only the list scrolls inside it.
+        describe("the card's height", () => {
+            it.each([
+                { layout: undefined, rows: undefined, max_height: undefined, style: "" },
+                { layout: undefined, rows: undefined, max_height: 300, style: "max-height: 300px;" },
+                { layout: "grid", rows: 6, max_height: 300, style: "height: 100%;" },
+                { layout: "grid", rows: 6, max_height: undefined, style: "height: 100%;" },
+                { layout: "grid", rows: "auto", max_height: 300, style: "max-height: 300px;" },
+                { layout: "grid", rows: undefined, max_height: undefined, style: "" },
+                { layout: "grid", rows: undefined, max_height: 300, style: "max-height: 300px;" },
+                { layout: "grid", rows: "auto", max_height: undefined, style: "" },
+                // Rows left in the configuration from a sections view mean nothing elsewhere.
+                { layout: undefined, rows: 6, max_height: 300, style: "max-height: 300px;" },
+                { layout: undefined, rows: 6, max_height: undefined, style: "" },
+                { layout: undefined, rows: "auto", max_height: 300, style: "max-height: 300px;" },
+                { layout: undefined, rows: "auto", max_height: undefined, style: "" },
+            ])(
+                "is '$style' in the layout $layout with rows $rows and max_height $max_height",
+                async ({ layout, rows: gridRows, max_height, style }) => {
+                    const element = document.createElement("adsb-receiver-card");
+                    element.setConfig({
+                        type: "custom:adsb-receiver-card",
+                        device: RECEIVER,
+                        ...(max_height === undefined ? {} : { max_height }),
+                        ...(gridRows === undefined ? {} : { grid_options: { rows: gridRows } }),
+                    } as AdsbReceiverCardConfig);
+                    (element as unknown as { layout?: string }).layout = layout;
+                    element.hass = hass();
+                    document.body.append(element);
+                    await element.updateComplete;
+                    const drawn = element.shadowRoot!.querySelector("ha-card")!;
+                    expect(drawn.getAttribute("style") ?? "").toBe(style);
+                    expect(drawn.classList.contains("held")).toBe(style !== "");
+                },
+            );
+        });
+
+        describe("a max_height that isn't a number of pixels", () => {
+            it.each([{ max_height: 0 }, { max_height: -10 }, { max_height: "300px" }, { max_height: Number.NaN }])(
+                "is refused: $max_height",
+                ({ max_height }) => {
+                    const element = document.createElement("adsb-receiver-card");
+                    expect(() =>
+                        element.setConfig({
+                            type: "custom:adsb-receiver-card",
+                            device: RECEIVER,
+                            max_height,
+                        } as unknown as AdsbReceiverCardConfig),
+                    ).toThrow("Invalid configuration");
+                },
+            );
+        });
+    });
+
     it("refuses a configuration without a receiver", () => {
         const element = document.createElement("adsb-receiver-card");
         expect(() => element.setConfig({ type: "custom:adsb-receiver-card" } as AdsbReceiverCardConfig)).toThrow("Invalid configuration");
@@ -405,6 +1033,16 @@ describe("the editor", () => {
                 case: "the compact layout and a name",
                 form: { type: "custom:adsb-receiver-card", device: RECEIVER, layout: "compact", name: "Katto" },
                 saved: { type: "custom:adsb-receiver-card", device: RECEIVER, layout: "compact", name: "Katto" },
+            },
+            {
+                case: "the list closed and no height",
+                form: { type: "custom:adsb-receiver-card", device: RECEIVER, list_open: false, max_height: undefined },
+                saved: { type: "custom:adsb-receiver-card", device: RECEIVER },
+            },
+            {
+                case: "the list open and a height",
+                form: { type: "custom:adsb-receiver-card", device: RECEIVER, list_open: true, max_height: 480 },
+                saved: { type: "custom:adsb-receiver-card", device: RECEIVER, list_open: true, max_height: 480 },
             },
             {
                 case: "a feeder with empty fields",

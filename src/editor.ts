@@ -32,6 +32,8 @@ function receiverSchema(text: (key: string) => string) {
                 },
             },
         },
+        { name: "list_open", selector: { boolean: {} } },
+        { name: "max_height", selector: { number: { min: 1, mode: "box", unit_of_measurement: "px" } } },
     ];
 }
 
@@ -141,6 +143,12 @@ export class AdsbReceiverCardEditor extends LitElement {
         // The default is shown in the form but left out of the configuration.
         if (!config.layout || config.layout === "full") {
             delete config.layout;
+        }
+        if (!config.list_open) {
+            delete config.list_open;
+        }
+        if (!config.max_height) {
+            delete config.max_height;
         }
         this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
     }

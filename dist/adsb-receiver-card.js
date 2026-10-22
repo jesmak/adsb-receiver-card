@@ -618,9 +618,46 @@ var SENSORS = [
 ];
 var HISTORY_HOURS = 24;
 var HISTORY_REFRESH_MS = 10 * 6e4;
+var AIRCRAFT_REFRESH_MS = 1e4;
 var RANGE_MINUTES = 15;
 var METER_MIN_DBFS = -50;
 var METER_MAX_DBFS = 0;
+
+// src/aircraft.ts
+var RECEIVER_AIRCRAFT_SERVICE = "get_receiver_aircraft";
+function hasReceiverAircraft(hass) {
+  return !!hass.services?.[PLATFORM]?.[RECEIVER_AIRCRAFT_SERVICE];
+}
+async function fetchReceiverAircraft(hass, device) {
+  if (!hass.callWS) {
+    throw new Error("Home Assistant has no websocket to ask with");
+  }
+  const result = await hass.callWS({
+    type: "call_service",
+    domain: PLATFORM,
+    service: RECEIVER_AIRCRAFT_SERVICE,
+    service_data: { device },
+    return_response: true
+  });
+  const answer = result?.response;
+  if (!answer || !Array.isArray(answer.aircraft)) {
+    throw new Error("ADS-B Live answered without a list of aircraft");
+  }
+  return answer;
+}
+function byHeard(aircraft) {
+  return [...aircraft].sort((one, other) => Date.parse(other.heard) - Date.parse(one.heard) || one.name.localeCompare(other.name));
+}
+function heardAgo(heard, now) {
+  const seconds = Math.floor((now - Date.parse(heard)) / 1e3);
+  if (!Number.isFinite(seconds)) {
+    return null;
+  }
+  if (seconds < 2) {
+    return { unit: "now", value: 0 };
+  }
+  return seconds < 60 ? { unit: "seconds", value: seconds } : { unit: "minutes", value: Math.floor(seconds / 60) };
+}
 
 // src/localize/languages/en.json
 var en_default = {
@@ -656,6 +693,19 @@ var en_default = {
     noise: "Noise",
     signal_unknown: "Signal unknown"
   },
+  list: {
+    title: "Aircraft heard",
+    name_type: "Callsign \xB7 type",
+    altitude: "Altitude",
+    signal: "Signal",
+    ground: "on the ground",
+    now: "now",
+    seconds: "{value} s",
+    minutes: "{value} min",
+    speed: "{value} km/h",
+    empty: "No aircraft heard in the last minute",
+    failed: "The aircraft couldn't be read"
+  },
   editor: {
     device: "Receiver",
     name: "Name",
@@ -663,6 +713,10 @@ var en_default = {
     layout: "Layout",
     layout_full: "Full",
     layout_compact: "Compact, one row",
+    list_open: "Aircraft list open at first",
+    list_open_helper: "Otherwise the list opens from its heading",
+    max_height: "Maximum height",
+    max_height_helper: "In pixels. Only the aircraft list scrolls inside it. In a sections view, a set number of rows wins.",
     feeders: "Feeders",
     feeders_helper: "Other feeders' status as rows under the receiver, such as Flightradar24's. Shown in the full layout.",
     feeder_entity: "Status",
@@ -708,6 +762,19 @@ var fi_default = {
     noise: "Kohina",
     signal_unknown: "Signaali ei tiedossa"
   },
+  list: {
+    title: "Kuultavat koneet",
+    name_type: "Tunnus \xB7 tyyppi",
+    altitude: "Korkeus",
+    signal: "Signaali",
+    ground: "maassa",
+    now: "nyt",
+    seconds: "{value} s",
+    minutes: "{value} min",
+    speed: "{value} km/h",
+    empty: "Viimeisen minuutin aikana ei ole kuultu koneita",
+    failed: "Koneita ei saatu luettua"
+  },
   editor: {
     device: "Vastaanotin",
     name: "Nimi",
@@ -715,6 +782,10 @@ var fi_default = {
     layout: "Asettelu",
     layout_full: "T\xE4ysi",
     layout_compact: "Tiivis, yksi rivi",
+    list_open: "Koneiden lista auki alussa",
+    list_open_helper: "Muuten lista avautuu otsikostaan",
+    max_height: "Enimm\xE4iskorkeus",
+    max_height_helper: "Pikselein\xE4. Vain koneiden lista vierii sen sis\xE4ll\xE4. Osion\xE4kym\xE4ss\xE4 asetettu rivim\xE4\xE4r\xE4 menee edelle.",
     feeders: "Sy\xF6tteet",
     feeders_helper: "Muiden sy\xF6tt\xE4jien tila rivein\xE4 vastaanottimen alla, esimerkiksi Flightradar24:n. N\xE4kyy t\xE4ydess\xE4 asettelussa.",
     feeder_entity: "Tila",
@@ -770,7 +841,9 @@ function receiverSchema(text) {
           ]
         }
       }
-    }
+    },
+    { name: "list_open", selector: { boolean: {} } },
+    { name: "max_height", selector: { number: { min: 1, mode: "box", unit_of_measurement: "px" } } }
   ];
 }
 function feedersSchema(text) {
@@ -864,6 +937,12 @@ var AdsbReceiverCardEditor = class extends i4 {
     }
     if (!config.layout || config.layout === "full") {
       delete config.layout;
+    }
+    if (!config.list_open) {
+      delete config.list_open;
+    }
+    if (!config.max_height) {
+      delete config.max_height;
     }
     this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
   }
@@ -964,8 +1043,10 @@ function meter(signal, noise) {
   if (noise === null) {
     return null;
   }
-  const place = (level) => (Math.min(Math.max(level, METER_MIN_DBFS), METER_MAX_DBFS) - METER_MIN_DBFS) / (METER_MAX_DBFS - METER_MIN_DBFS) * 100;
-  return { noise: place(noise), signal: signal === null ? null : place(signal) };
+  return { noise: meterPlace(noise), signal: signal === null ? null : meterPlace(signal) };
+}
+function meterPlace(level) {
+  return (Math.min(Math.max(level, METER_MIN_DBFS), METER_MAX_DBFS) - METER_MIN_DBFS) / (METER_MAX_DBFS - METER_MIN_DBFS) * 100;
 }
 var UP = ["on", "connected", "online", "ok", "home"];
 var DOWN = ["off", "disconnected", "offline", "not_home"];
@@ -1029,6 +1110,18 @@ var AdsbReceiverCard = class extends i4 {
     super(...arguments);
     this.history = [];
     this.historyLoaded = false;
+    this.listOpen = false;
+    this.aircraftFailed = false;
+    this.clock = Date.now();
+    this.aircraftReadAt = 0;
+    this.aircraftReading = false;
+    this.sliding = false;
+    this.slid = (event) => {
+      if (event.propertyName === "grid-template-rows" && event.target === event.currentTarget) {
+        clearTimeout(this.slideTimer);
+        this.sliding = false;
+      }
+    };
   }
   static getConfigElement() {
     return document.createElement("adsb-receiver-card-editor");
@@ -1041,10 +1134,34 @@ var AdsbReceiverCard = class extends i4 {
     if (!config || typeof config.device !== "string" || !config.device) {
       throw new Error(translate(browserLanguage(), "common.invalid_configuration"));
     }
+    const maxHeight = config.max_height;
+    if (maxHeight !== void 0 && !(typeof maxHeight === "number" && Number.isFinite(maxHeight) && maxHeight > 0)) {
+      throw new Error(translate(browserLanguage(), "common.invalid_configuration"));
+    }
+    const previous = this.config;
+    if (!previous || previous.list_open === true !== (config.list_open === true)) {
+      if (previous && this.listOpen !== (config.list_open === true)) {
+        this.slide();
+      }
+      this.listOpen = config.list_open === true;
+    }
+    if (previous && previous.device !== config.device) {
+      this.aircraft = void 0;
+      this.aircraftFailed = false;
+      this.aircraftOf = config.device;
+      this.aircraftReadAt = 0;
+    }
     this.config = { ...config, feeders: Array.isArray(config.feeders) ? config.feeders.filter((feeder) => !!feeder?.entity) : [] };
+    if (this.isConnected) {
+      if (this.listOpen) {
+        this.startList();
+      } else {
+        this.stopList();
+      }
+    }
   }
   getCardSize() {
-    return this.compact() ? 1 : 5 + (this.config?.feeders?.length ?? 0);
+    return this.compact() ? 1 : 6 + (this.config?.feeders?.length ?? 0);
   }
   /** In a sections view the card takes a whole section by default and is never narrower than half of one. */
   getGridOptions() {
@@ -1055,20 +1172,32 @@ var AdsbReceiverCard = class extends i4 {
     super.connectedCallback();
     this.timer = setInterval(() => void this.loadHistory(true), HISTORY_REFRESH_MS);
     void this.loadHistory(true);
+    if (this.listOpen) {
+      this.startList();
+    }
   }
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this.timer);
+    clearTimeout(this.slideTimer);
+    this.sliding = false;
+    this.stopList();
   }
   shouldUpdate(changed) {
     const previous = changed.get("hass");
     if (!this.config || !this.hass || changed.size > 1 || !changed.has("hass") || !previous) {
       return true;
     }
-    if (previous.entities !== this.hass.entities || previous.devices !== this.hass.devices || previous.locale !== this.hass.locale || previous.language !== this.hass.language || previous.formatEntityState !== this.hass.formatEntityState) {
+    if (previous.entities !== this.hass.entities || previous.devices !== this.hass.devices || previous.locale !== this.hass.locale || previous.language !== this.hass.language || previous.services !== this.hass.services || previous.formatEntityState !== this.hass.formatEntityState) {
       return true;
     }
     return this.watched().some((id) => previous.states[id] !== this.hass?.states[id]);
+  }
+  /** A redraw while the list is on the card shows its ages as they are now, also the first one after it comes back. */
+  willUpdate() {
+    if (this.listOpen && this.listShown()) {
+      this.clock = Date.now();
+    }
   }
   updated() {
     void this.loadHistory(false);
@@ -1118,8 +1247,9 @@ var AdsbReceiverCard = class extends i4 {
     const device = this.hass?.devices?.[this.config?.device ?? ""];
     const version = device?.sw_version ? [device.manufacturer, device.sw_version].filter(Boolean).join(" ") : "";
     const available = status !== "unavailable";
+    const height = this.heightStyle();
     return b2`
-            <ha-card class="full ${status}">
+            <ha-card class="full ${status} ${height ? "held" : ""}" style=${height}>
                 <div class="top">
                     ${this.icon()}
                     <div class="who">
@@ -1135,7 +1265,7 @@ var AdsbReceiverCard = class extends i4 {
                                   ${this.figure(sensors.aircraft_with_position, "figures.with_position")}
                                   ${this.figure(sensors.max_range, "figures.range", true, { minutes: formatNumber(RANGE_MINUTES, this.numberFormat(), 0) })}
                               </div>
-                              ${this.curve(sensors)} ${this.meter(sensors)}
+                              ${this.curve(sensors)} ${this.meter(sensors)} ${this.aircraftList()}
                           ` : A}
                 ${this.config?.feeders?.length ? b2`<div class="feeders">${this.config.feeders.map((feeder) => this.feeder(feeder))}</div>` : A}
             </ha-card>
@@ -1162,6 +1292,148 @@ var AdsbReceiverCard = class extends i4 {
                 </button>
             </ha-card>
         `;
+  }
+  /** The aircraft the receiver hears, folded under its heading. It is read only while it is open. */
+  aircraftList() {
+    if (!this.listShown()) {
+      return A;
+    }
+    const count = this.listOpen && this.aircraft ? this.aircraft.aircraft.length : void 0;
+    return b2`
+            <div class="aircraft ${this.sliding ? "sliding" : ""}">
+                <button
+                    class="list-heading ${this.listOpen ? "open" : ""}"
+                    aria-expanded=${this.listOpen ? "true" : "false"}
+                    @click=${this.toggleList}
+                >
+                    <span class="list-title">${this.text("list.title")}</span>
+                    ${count === void 0 ? A : b2`<span class="count">${formatNumber(count, this.numberFormat(), 0)}</span>`}
+                    <ha-icon icon="mdi:chevron-down"></ha-icon>
+                </button>
+                <div class="fold ${this.listOpen ? "open" : ""}" ?inert=${!this.listOpen} @transitionend=${this.slid}>
+                    <div class="fold-in">${this.planes()}</div>
+                </div>
+            </div>
+        `;
+  }
+  /** Whether the list is on the card: the full layout of a receiver that isn't unavailable, with ADS-B Live's action. */
+  listShown() {
+    const hass = this.hass;
+    if (!hass || !this.config || this.compact() || !hasReceiverAircraft(hass) || !hass.devices?.[this.config.device]) {
+      return false;
+    }
+    const sensors = receiverSensors(hass, this.config.device);
+    return Object.keys(sensors).length > 0 && receiverStatus(hass, sensors) !== "unavailable";
+  }
+  planes() {
+    if (!this.aircraft) {
+      return this.aircraftFailed ? b2`<div class="message">${this.text("list.failed")}</div>` : A;
+    }
+    if (!this.aircraft.aircraft.length) {
+      return b2`<div class="message">${this.text("list.empty")}</div>`;
+    }
+    const unit = this.aircraft.altitude_unit;
+    return b2`
+            <div class="planes">
+                <div class="plane-head">
+                    <span>${this.text("list.name_type")}</span>
+                    <span>${this.text("list.altitude")}</span>
+                    <span>${this.text("list.signal")}</span>
+                </div>
+                ${byHeard(this.aircraft.aircraft).map((plane) => this.plane(plane, unit))}
+            </div>
+        `;
+  }
+  plane(plane, unit) {
+    const format = this.numberFormat();
+    const altitude = plane.on_ground ? this.text("list.ground") : plane.altitude === void 0 ? "\u2013" : `${formatNumber(plane.altitude, format, 0)} ${unit}`;
+    const ago = heardAgo(plane.heard, this.clock);
+    const sub = [
+      plane.speed_kmh === void 0 ? "" : this.text("list.speed", { value: formatNumber(plane.speed_kmh, format, 0) }),
+      ago ? this.text(`list.${ago.unit}`, { value: formatNumber(ago.value, format, 0) }) : ""
+    ].filter(Boolean);
+    return b2`
+            <div class="plane ${plane.position ? "" : "nopos"}">
+                <span class="id"
+                    ><span class="callsign">${plane.name}</span
+                    >${plane.type ? b2` <span class="type">${plane.type}</span>` : A}</span
+                >
+                <span class="sub">${sub.join(" \xB7 ")}</span>
+                <span class="altitude">${altitude}</span>
+                <span class="signal"
+                    >${plane.rssi === void 0 ? A : b2`<i style="width: ${Number(meterPlace(plane.rssi).toFixed(1))}%"></i>`}</span
+                >
+            </div>
+        `;
+  }
+  toggleList() {
+    this.slide();
+    this.listOpen = !this.listOpen;
+    if (this.listOpen && this.isConnected) {
+      this.startList();
+    } else {
+      this.stopList();
+    }
+  }
+  slide() {
+    this.sliding = true;
+    clearTimeout(this.slideTimer);
+    this.slideTimer = setTimeout(() => this.sliding = false, 1e3);
+  }
+  /** Reads the list now and every AIRCRAFT_REFRESH_MS, and moves its ages on every second. */
+  startList() {
+    this.stopList();
+    this.clock = Date.now();
+    void this.loadAircraft();
+    this.listTimer = setInterval(() => {
+      if (!this.listShown()) {
+        return;
+      }
+      this.clock = Date.now();
+      if (this.clock - this.aircraftReadAt >= AIRCRAFT_REFRESH_MS) {
+        void this.loadAircraft();
+      }
+    }, 1e3);
+  }
+  stopList() {
+    clearInterval(this.listTimer);
+    this.listTimer = void 0;
+  }
+  async loadAircraft() {
+    const hass = this.hass;
+    const device = this.config?.device;
+    if (!hass || !device || this.aircraftReading || !this.listShown()) {
+      return;
+    }
+    if (this.aircraftOf !== device) {
+      this.aircraft = void 0;
+      this.aircraftFailed = false;
+      this.aircraftOf = device;
+    }
+    this.aircraftReading = true;
+    this.aircraftReadAt = Date.now();
+    try {
+      const answer = await fetchReceiverAircraft(hass, device);
+      if (this.aircraftOf === device) {
+        this.aircraft = answer;
+        this.aircraftFailed = false;
+      }
+    } catch (error) {
+      console.warn("adsb-receiver-card: could not read the aircraft of", device, error);
+      if (this.aircraftOf === device && !this.aircraft) {
+        this.aircraftFailed = true;
+      }
+    } finally {
+      this.aircraftReading = false;
+    }
+  }
+  /** The card's height: the rows of a sections view when they are a number, otherwise up to `max_height`. */
+  heightStyle() {
+    const rows = this.config?.grid_options?.rows;
+    if (this.layout === "grid" && typeof rows === "number") {
+      return "height: 100%;";
+    }
+    return this.config?.max_height ? `max-height: ${this.config.max_height}px;` : "";
   }
   /** Parts of a sentence, each kept whole, so a number never wraps away from its unit. */
   pieces(parts) {
@@ -1548,6 +1820,190 @@ var AdsbReceiverCard = class extends i4 {
                 background: var(--primary-color);
             }
 
+            /* Held to a height, by max_height or a sections view's rows, the card is a column in which only the list scrolls. */
+            ha-card.held {
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            ha-card.held > * {
+                flex: none;
+            }
+
+            ha-card.held > .aircraft {
+                display: flex;
+                flex: 0 1 auto;
+                flex-direction: column;
+                min-height: 0;
+            }
+
+            ha-card.held .fold {
+                flex: 0 1 auto;
+            }
+
+            ha-card.held .fold-in {
+                display: flex;
+                flex-direction: column;
+            }
+
+            ha-card.held .planes {
+                min-height: 0;
+                overflow-y: auto;
+            }
+
+            ha-card.held .aircraft.sliding .planes {
+                overflow-y: hidden;
+            }
+
+            .aircraft {
+                margin-top: 12px;
+                border-top: 1px solid var(--divider-color);
+            }
+
+            .list-heading {
+                display: flex;
+                flex: none;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+                padding: 10px 0 8px;
+                font-size: 14px;
+            }
+
+            .list-heading .count {
+                color: var(--secondary-text-color);
+            }
+
+            .list-heading ha-icon {
+                --mdc-icon-size: 20px;
+                margin-left: auto;
+                color: var(--secondary-text-color);
+                transition: transform var(--ha-animation-duration-fast, 150ms);
+            }
+
+            .list-heading.open ha-icon {
+                transform: rotate(180deg);
+            }
+
+            /* The list slides open and shut, on Home Assistant's timing, which is near none under the system's reduced motion. */
+            .fold {
+                display: grid;
+                grid-template-rows: 0fr;
+                min-height: 0;
+                transition: grid-template-rows var(--ha-animation-duration-normal, 250ms) ease;
+            }
+
+            .fold.open {
+                grid-template-rows: 1fr;
+            }
+
+            .fold-in {
+                min-height: 0;
+                overflow: hidden;
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                .fold,
+                .list-heading ha-icon {
+                    transition: none;
+                }
+            }
+
+            /* The list's last row has its own line under it, the feeders'. */
+            .aircraft + .feeders {
+                margin-top: 0;
+            }
+
+            .aircraft .message {
+                padding: 4px 0 8px;
+                font-size: 13px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane-head,
+            .plane {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto 56px;
+                align-items: center;
+                gap: 0 8px;
+            }
+
+            /* Kept at the top of a list that scrolls. */
+            .plane-head {
+                position: sticky;
+                top: 0;
+                z-index: 1;
+                background: var(--ha-card-background, var(--card-background-color, #fff));
+                padding: 2px 0 4px;
+                font-size: 11px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane-head span:nth-child(2) {
+                text-align: right;
+            }
+
+            .plane {
+                grid-template-areas: "id altitude signal" "sub altitude signal";
+                padding: 5px 0;
+                border-top: 1px solid var(--divider-color);
+                font-size: 13px;
+            }
+
+            .plane .id {
+                grid-area: id;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .plane .callsign {
+                font-weight: 500;
+            }
+
+            .plane .type {
+                margin-left: 2px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane .sub {
+                grid-area: sub;
+                font-size: 11px;
+                color: var(--secondary-text-color);
+            }
+
+            .plane .altitude {
+                grid-area: altitude;
+                text-align: right;
+                white-space: nowrap;
+            }
+
+            .plane .signal {
+                grid-area: signal;
+                position: relative;
+                height: 6px;
+                border-radius: 3px;
+                background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.08);
+            }
+
+            .plane .signal i {
+                position: absolute;
+                inset: 0 auto 0 0;
+                border-radius: 3px;
+                background: var(--primary-color);
+            }
+
+            /* Heard without a position, as the card's figures count it apart. */
+            .plane.nopos .callsign {
+                font-weight: 400;
+            }
+
+            .plane.nopos .id,
+            .plane.nopos .altitude {
+                color: var(--secondary-text-color);
+            }
+
             .feeders {
                 margin-top: 12px;
                 padding-top: 6px;
@@ -1637,6 +2093,9 @@ __decorateClass([
   n4({ attribute: false })
 ], AdsbReceiverCard.prototype, "hass", 2);
 __decorateClass([
+  n4({ attribute: false })
+], AdsbReceiverCard.prototype, "layout", 2);
+__decorateClass([
   r5()
 ], AdsbReceiverCard.prototype, "config", 2);
 __decorateClass([
@@ -1645,6 +2104,21 @@ __decorateClass([
 __decorateClass([
   r5()
 ], AdsbReceiverCard.prototype, "historyLoaded", 2);
+__decorateClass([
+  r5()
+], AdsbReceiverCard.prototype, "listOpen", 2);
+__decorateClass([
+  r5()
+], AdsbReceiverCard.prototype, "aircraft", 2);
+__decorateClass([
+  r5()
+], AdsbReceiverCard.prototype, "aircraftFailed", 2);
+__decorateClass([
+  r5()
+], AdsbReceiverCard.prototype, "clock", 2);
+__decorateClass([
+  r5()
+], AdsbReceiverCard.prototype, "sliding", 2);
 AdsbReceiverCard = __decorateClass([
   t3("adsb-receiver-card")
 ], AdsbReceiverCard);

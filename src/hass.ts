@@ -33,7 +33,9 @@ export interface HomeAssistant {
     locale?: { language?: string; number_format?: string };
     /** A state in the user's language and number format, with its unit: "Yhdistetty", "5 lentoalusta". */
     formatEntityState?: (entity: HassEntity, state?: string) => string;
-    /** A websocket command, such as a recorder query. */
+    /** The actions Home Assistant has, by domain and name. */
+    services?: Record<string, Record<string, unknown> | undefined>;
+    /** A websocket command, such as a recorder query or an action with a response. */
     callWS?: <T>(message: Record<string, unknown>) => Promise<T>;
 }
 

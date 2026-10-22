@@ -31,6 +31,19 @@
         "noise": "Kohina",
         "signal_unknown": "Signaali ei tiedossa"
     },
+    "list": {
+        "title": "Kuultavat koneet",
+        "name_type": "Tunnus · tyyppi",
+        "altitude": "Korkeus",
+        "signal": "Signaali",
+        "ground": "maassa",
+        "now": "nyt",
+        "seconds": "{value} s",
+        "minutes": "{value} min",
+        "speed": "{value} km/h",
+        "empty": "Viimeisen minuutin aikana ei ole kuultu koneita",
+        "failed": "Koneita ei saatu luettua"
+    },
     "editor": {
         "device": "Vastaanotin",
         "name": "Nimi",
@@ -38,6 +51,10 @@
         "layout": "Asettelu",
         "layout_full": "Täysi",
         "layout_compact": "Tiivis, yksi rivi",
+        "list_open": "Koneiden lista auki alussa",
+        "list_open_helper": "Muuten lista avautuu otsikostaan",
+        "max_height": "Enimmäiskorkeus",
+        "max_height_helper": "Pikseleinä. Vain koneiden lista vierii sen sisällä. Osionäkymässä asetettu rivimäärä menee edelle.",
         "feeders": "Syötteet",
         "feeders_helper": "Muiden syöttäjien tila riveinä vastaanottimen alla, esimerkiksi Flightradar24:n. Näkyy täydessä asettelussa.",
         "feeder_entity": "Tila",

@@ -18,4 +18,8 @@ export interface AdsbReceiverCardConfig extends LovelaceCardConfig {
     /** `full` shows everything, `compact` one row with a small curve. */
     layout?: "full" | "compact";
     feeders?: FeederConfig[];
+    /** Whether the list of the aircraft the receiver hears is open when the card is shown. It opens from its heading anyway. */
+    list_open?: boolean;
+    /** The most the card grows to, in pixels, with only the list scrolling. A sections view's rows win when they are a number. */
+    max_height?: number;
 }

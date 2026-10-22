@@ -103,9 +103,12 @@ export function meter(signal: number | null, noise: number | null): { noise: num
     if (noise === null) {
         return null;
     }
-    const place = (level: number) =>
-        ((Math.min(Math.max(level, METER_MIN_DBFS), METER_MAX_DBFS) - METER_MIN_DBFS) / (METER_MAX_DBFS - METER_MIN_DBFS)) * 100;
-    return { noise: place(noise), signal: signal === null ? null : place(signal) };
+    return { noise: meterPlace(noise), signal: signal === null ? null : meterPlace(signal) };
+}
+
+/** Where a level in dBFS falls on the meter's scale, as a percentage, the same for the meter and each aircraft's signal. */
+export function meterPlace(level: number): number {
+    return ((Math.min(Math.max(level, METER_MIN_DBFS), METER_MAX_DBFS) - METER_MIN_DBFS) / (METER_MAX_DBFS - METER_MIN_DBFS)) * 100;
 }
 
 const UP = ["on", "connected", "online", "ok", "home"];
